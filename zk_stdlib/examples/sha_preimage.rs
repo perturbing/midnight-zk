@@ -17,8 +17,7 @@ use midnight_proofs::{
     plonk::Error,
 };
 use midnight_zk_stdlib::{utils::plonk_api::filecoin_srs, Relation, ZkStdLib, ZkStdLibArch};
-use rand::{rngs::OsRng, Rng, SeedableRng};
-use rand_chacha::ChaCha8Rng;
+use rand::rngs::OsRng;
 use sha2::Digest;
 
 type F = midnight_curves::Fq;
@@ -72,10 +71,15 @@ fn main() {
     let vk = midnight_zk_stdlib::setup_vk(&srs, &relation);
     let pk = midnight_zk_stdlib::setup_pk(&relation, &vk);
 
-    // Sample a random preimage as the witness.
-    let mut rng = ChaCha8Rng::from_entropy();
-    let witness: [u8; 24] = core::array::from_fn(|_| rng.gen());
-    let instance = sha2::Sha256::digest(witness).into();
+    // Use "hello world" as the preimage, zero-padded to 24 bytes.
+    let mut witness = [0u8; 24];
+    let preimage = b"hello world";
+    witness[..preimage.len()].copy_from_slice(preimage);
+
+    let instance: [u8; 32] = sha2::Sha256::digest(witness).into();
+    println!("input  = {:?}", String::from_utf8_lossy(&witness));
+    println!("input  = {}", witness.iter().map(|b| format!("{b:02x}")).collect::<String>());
+    println!("SHA-256 = {}", instance.iter().map(|b| format!("{b:02x}")).collect::<String>());
 
     let proof = midnight_zk_stdlib::prove::<ShaPreImageCircuit, blake2b_simd::State>(
         &srs, &pk, &relation, &instance, witness, OsRng,

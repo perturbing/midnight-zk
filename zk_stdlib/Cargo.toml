@@ -67,6 +67,10 @@ name = "verify"
 harness = false
 
 [[example]]
+name = "sha_preimage"
+path = "examples/sha_preimage.rs"
+
+[[example]]
 name = "cred_full"
 path = "examples/identity/full_credential.rs"
 
