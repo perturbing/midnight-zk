@@ -19,12 +19,14 @@ pub struct Constructed<F: PrimeField, CS: PolynomialCommitmentScheme<F>> {
     random_poly_commitment: CS::Commitment,
 }
 
+#[derive(Debug)]
 pub struct PartiallyEvaluated<F: PrimeField, CS: PolynomialCommitmentScheme<F>> {
     h_commitments: Vec<CS::Commitment>,
     random_poly_commitment: CS::Commitment,
     random_eval: F,
 }
 
+#[derive(Debug)]
 pub struct Evaluated<F: PrimeField, CS: PolynomialCommitmentScheme<F>> {
     h_commitments: Vec<CS::Commitment>,
     random_poly_commitment: CS::Commitment,

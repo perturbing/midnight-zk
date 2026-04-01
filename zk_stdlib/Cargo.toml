@@ -71,6 +71,10 @@ name = "sha_preimage"
 path = "examples/sha_preimage.rs"
 
 [[example]]
+name = "sha_preimage_verify_manual"
+path = "examples/sha_preimage_verify_manual.rs"
+
+[[example]]
 name = "cred_full"
 path = "examples/identity/full_credential.rs"
 

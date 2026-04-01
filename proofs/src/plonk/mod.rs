@@ -33,7 +33,7 @@ pub(crate) mod evaluation;
 mod keygen;
 pub(crate) mod lookup;
 pub mod permutation;
-pub(crate) mod traces;
+pub mod traces;
 pub(crate) mod trash;
 pub(crate) mod vanishing;
 
@@ -52,6 +52,7 @@ use ff::{PrimeField, WithSmallOrderMulGroup};
 pub use keygen::*;
 use midnight_curves::serde::SerdeObject;
 pub use prover::*;
+pub use traces::VerifierTrace;
 pub use verifier::*;
 
 use crate::poly::commitment::PolynomialCommitmentScheme;
@@ -468,8 +469,13 @@ impl<F: PrimeField, CS: PolynomialCommitmentScheme<F>> VerifyingKey<F, CS> {
     }
 }
 
+/// Evaluates all circuit gate and argument identities at a random point `x`,
+/// verifying that the vanishing polynomial `h(x)` is consistent with the
+/// claimed polynomial evaluations.  Called by `verify_algebraic_constraints`
+/// after all evaluation openings have been read from the transcript.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn evaluate_identities<'a, F, CS>(
+#[allow(private_interfaces)]
+pub fn evaluate_identities<'a, F, CS>(
     vk: &'a VerifyingKey<F, CS>,
     fixed_evals: &'a [F],
     instance_evals: &'a [Vec<F>],

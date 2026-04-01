@@ -361,6 +361,205 @@ where
     }
 }
 
+/// All intermediate values produced during a GWC multi-open verification.
+///
+/// This struct captures every named variable in the GWC protocol so that an
+/// external implementation can replicate each step independently.
+#[derive(Debug, Clone)]
+pub struct GwcOpeningData<E: Engine> {
+    /// Batches commitments at the same evaluation point.
+    pub x1: E::Fr,
+    /// Batches across different point sets.
+    pub x2: E::Fr,
+    /// Random evaluation point for the f-polynomial check.
+    pub x3: E::Fr,
+    /// Final batching randomness.
+    pub x4: E::Fr,
+    /// Prover's auxiliary commitment f (read from proof).
+    pub f_com: E::G1,
+    /// Prover's evaluations q_i(x3), one per point set (read from proof).
+    pub q_evals_on_x3: Vec<E::Fr>,
+    /// Verifier-computed f(x3) via Lagrange interpolation.
+    pub f_eval: E::Fr,
+    /// Combined expected evaluation: Σ x4^i·q_eval_i + x4^|sets|·f_eval.
+    pub v: E::Fr,
+    /// KZG opening proof — a single G1 point (read from proof).
+    pub pi: E::G1,
+    /// Σ x4^i·q_com_i + x4^|sets|·f_com  (evaluated G1 point).
+    pub final_com_g1: E::G1,
+    /// Left pairing input = π.
+    pub left_g1: E::G1,
+    /// Right pairing input = final_com + x3·π − v·G₁.
+    pub right_g1: E::G1,
+}
+
+/// Runs the GWC multi-open verification while recording all intermediate
+/// values into a [`GwcOpeningData`].
+///
+/// This is a transparent version of [`KZGCommitmentScheme::multi_prepare`]:
+/// it produces the same [`DualMSM`] but also returns all named protocol
+/// variables so callers can inspect or re-implement each step.
+pub fn gwc_multi_open_explicit<'com, E, T>(
+    verifier_query: &[VerifierQuery<'com, E::Fr, KZGCommitmentScheme<E>>],
+    transcript: &mut T,
+) -> Result<(DualMSM<E>, GwcOpeningData<E>), Error>
+where
+    E: MultiMillerLoop + Debug,
+    T: Transcript,
+    E::Fr: Sampleable<T::Hash> + Ord + Hash + Hashable<T::Hash>,
+    E::G1: 'com + Default + Hashable<T::Hash> + CurveExt<ScalarExt = E::Fr> + ProcessedSerdeObject,
+    E::G1Affine: Default + CurveAffine<ScalarExt = E::Fr, CurveExt = E::G1>,
+{
+    // ── Step t: squeeze x1, x2 ──────────────────────────────────────────────
+    let x1: E::Fr = transcript.squeeze_challenge();
+    let x2: E::Fr = transcript.squeeze_challenge();
+
+    let (commitment_map, point_sets) = construct_intermediate_sets(verifier_query)?;
+
+    let mut q_coms: Vec<_> = vec![vec![]; point_sets.len()];
+    let mut q_eval_sets = vec![vec![]; point_sets.len()];
+
+    for com_data in commitment_map.into_iter() {
+        let mut msm = MSMKZG::init();
+        let eval_point_opt = if com_data.commitment.is_chopped() {
+            debug_assert!(com_data.point_indices.len() == 1);
+            Some(point_sets[com_data.set_index][com_data.point_indices[0]])
+        } else {
+            None
+        };
+        for (scalar, commitment) in com_data.commitment.as_terms(eval_point_opt) {
+            msm.append_term(scalar, commitment, com_data.commitment_label.clone());
+        }
+        q_coms[com_data.set_index].push(msm);
+        q_eval_sets[com_data.set_index].push(com_data.evals);
+    }
+
+    let nb_x1_powers = q_coms.iter().map(|v| v.len()).max().unwrap_or(0);
+    assert!(nb_x1_powers >= q_eval_sets.iter().map(|v| v.len()).max().unwrap_or(0));
+
+    #[cfg(feature = "truncated-challenges")]
+    let powers_x1 = truncated_powers(x1).take(nb_x1_powers).collect::<Vec<_>>();
+    #[cfg(not(feature = "truncated-challenges"))]
+    let powers_x1 = powers(x1).take(nb_x1_powers).collect::<Vec<_>>();
+
+    let q_coms = q_coms
+        .into_iter()
+        .map(|msms| msm_inner_product(msms, &powers_x1))
+        .collect::<Vec<_>>();
+
+    let q_eval_sets = q_eval_sets
+        .iter()
+        .map(|evals| evals_inner_product(evals, &powers_x1))
+        .collect::<Vec<_>>();
+
+    // Sort point sets by ascending cardinality (same deterministic order as multi_prepare).
+    let (q_coms, q_eval_sets, point_sets) = {
+        let mut order: Vec<usize> = (0..point_sets.len()).collect();
+        order.sort_by_key(|&i| (point_sets[i].len(), i));
+        let q_coms: Vec<_> = order.iter().map(|&i| q_coms[i].clone()).collect();
+        let q_eval_sets: Vec<_> = order.iter().map(|&i| q_eval_sets[i].clone()).collect();
+        let point_sets: Vec<_> = order.iter().map(|&i| point_sets[i].clone()).collect();
+        (q_coms, q_eval_sets, point_sets)
+    };
+
+    // ── Step u: read f_com from proof ────────────────────────────────────────
+    let f_com: E::G1 = transcript.read().map_err(|_| Error::SamplingError)?;
+
+    // ── Step v: squeeze x3, read q_evals_on_x3, compute f_eval ──────────────
+    let x3: E::Fr = transcript.squeeze_challenge();
+    #[cfg(feature = "truncated-challenges")]
+    let x3 = truncate(x3);
+
+    let mut q_evals_on_x3 = Vec::<E::Fr>::with_capacity(q_eval_sets.len());
+    for _ in 0..q_eval_sets.len() {
+        q_evals_on_x3.push(transcript.read().map_err(|_| Error::SamplingError)?);
+    }
+
+    let f_eval =
+        point_sets.iter().zip(q_eval_sets.iter()).zip(q_evals_on_x3.iter()).rev().fold(
+            E::Fr::ZERO,
+            |acc_eval, ((points, evals), proof_eval)| {
+                let r_poly = lagrange_interpolate(points, evals);
+                let r_eval = eval_polynomial(&r_poly, x3);
+                let den = points.iter().fold(E::Fr::ONE, |acc, point| acc * &(x3 - point));
+                let eval = (*proof_eval - &r_eval) * den.invert().unwrap();
+                acc_eval * &(x2) + &eval
+            },
+        );
+
+    // ── Step w: squeeze x4, build final_com and v ────────────────────────────
+    let x4: E::Fr = transcript.squeeze_challenge();
+
+    let final_com = {
+        let size = q_coms.len() + 1;
+        let mut coms = q_coms.clone();
+        let mut f_com_as_msm = MSMKZG::init();
+        f_com_as_msm.append_term(E::Fr::ONE, f_com, CommitmentLabel::NoLabel);
+        #[cfg(feature = "truncated-challenges")]
+        coms.iter_mut().skip(1).for_each(MSMKZG::collapse);
+        coms.push(f_com_as_msm);
+        #[cfg(feature = "truncated-challenges")]
+        let powers = truncated_powers(x4);
+        #[cfg(not(feature = "truncated-challenges"))]
+        let powers = powers(x4);
+        msm_inner_product(coms, &powers.take(size).collect::<Vec<_>>())
+    };
+
+    let v = {
+        let mut evals = q_evals_on_x3.clone();
+        evals.push(f_eval);
+        #[cfg(feature = "truncated-challenges")]
+        let powers = truncated_powers(x4);
+        #[cfg(not(feature = "truncated-challenges"))]
+        let powers = powers(x4);
+        inner_product(&evals, powers)
+    };
+
+    // ── Step x: read π, build DualMSM ────────────────────────────────────────
+    let pi: E::G1 = transcript.read().map_err(|_| Error::SamplingError)?;
+
+    let mut pi_msm = MSMKZG::<E>::init();
+    pi_msm.append_term(E::Fr::ONE, pi, CommitmentLabel::Custom("π".into()));
+
+    let scaled_pi = MSMKZG {
+        scalars: vec![x3, v],
+        bases: vec![pi, -E::G1::generator()],
+        labels: vec![
+            CommitmentLabel::Custom("π".into()),
+            CommitmentLabel::Custom("-G".into()),
+        ],
+    };
+
+    let mut msm_accumulator = DualMSM {
+        left: pi_msm,
+        right: final_com.clone(),
+    };
+    msm_accumulator.right.add_msm(&scaled_pi);
+
+    // ── Compute explicit G1 values for GwcOpeningData ────────────────────────
+    use crate::utils::arithmetic::MSM;
+    let final_com_g1: E::G1 = final_com.eval();
+    let left_g1: E::G1 = pi; // scalar is 1
+    let right_g1: E::G1 = final_com_g1 + pi * x3 - E::G1::generator() * v;
+
+    let opening_data = GwcOpeningData {
+        x1,
+        x2,
+        x3,
+        x4,
+        f_com,
+        q_evals_on_x3,
+        f_eval,
+        v,
+        pi,
+        final_com_g1,
+        left_g1,
+        right_g1,
+    };
+
+    Ok((msm_accumulator, opening_data))
+}
+
 #[cfg(test)]
 mod tests {
     use std::hash::Hash;

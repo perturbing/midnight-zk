@@ -73,7 +73,7 @@ fn main() {
 
     // Use "hello world" as the preimage, zero-padded to 24 bytes.
     let mut witness = [0u8; 24];
-    let preimage = b"hello world";
+    let preimage = b"hello worl";
     witness[..preimage.len()].copy_from_slice(preimage);
 
     let instance: [u8; 32] = sha2::Sha256::digest(witness).into();
@@ -85,6 +85,33 @@ fn main() {
         &srs, &pk, &relation, &instance, witness, OsRng,
     )
     .expect("Proof generation should not fail");
+
+    // Write artifacts to disk so sha_preimage_verify_manual can load them.
+    {
+        use midnight_proofs::utils::SerdeFormat;
+        use std::fs;
+
+        let dir = "examples/assets";
+        fs::write(format!("{dir}/sha_preimage_proof.bin"), &proof)
+            .expect("failed to write proof");
+
+        let mut f = fs::File::create(format!("{dir}/sha_preimage_vk.bin"))
+            .expect("failed to create vk file");
+        vk.write(&mut f, SerdeFormat::Processed).expect("failed to write vk");
+
+        // verifier_params() serialises as a single compressed G2 point (96 bytes).
+        let mut f = fs::File::create(format!("{dir}/sha_preimage_verifier_params.bin"))
+            .expect("failed to create verifier params file");
+        srs.verifier_params()
+            .write(&mut f, SerdeFormat::Processed)
+            .expect("failed to write verifier params");
+
+        // Raw 32-byte SHA-256 hash (public instance).
+        fs::write(format!("{dir}/sha_preimage_instance.bin"), &instance)
+            .expect("failed to write instance");
+
+        println!("Artifacts written to {dir}/sha_preimage_{{proof,vk,verifier_params,instance}}.bin");
+    }
 
     assert!(
         midnight_zk_stdlib::verify::<ShaPreImageCircuit, blake2b_simd::State>(

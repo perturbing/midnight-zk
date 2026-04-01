@@ -45,3 +45,20 @@ pub struct VerifierTrace<F: PrimeField, PCS: PolynomialCommitmentScheme<F>> {
     pub(crate) trash_challenge: F,
     pub(crate) y: F,
 }
+
+impl<F: PrimeField, PCS: PolynomialCommitmentScheme<F>> VerifierTrace<F, PCS> {
+    /// Fiat-Shamir challenge for lookup column independence.
+    pub fn theta(&self) -> F { self.theta }
+    /// Fiat-Shamir challenge for permutation/lookup product arguments (first).
+    pub fn beta(&self) -> F { self.beta }
+    /// Fiat-Shamir challenge for permutation/lookup product arguments (second).
+    pub fn gamma(&self) -> F { self.gamma }
+    /// Fiat-Shamir challenge that keeps custom gates linearly independent.
+    pub fn y(&self) -> F { self.y }
+    /// Fiat-Shamir challenge for the trashcan argument.
+    pub fn trash_challenge(&self) -> F { self.trash_challenge }
+    /// Phase-based user-defined challenges squeezed during advice absorption.
+    pub fn challenges(&self) -> &[F] { &self.challenges }
+    /// Advice polynomial commitments read from the proof, grouped by proof index.
+    pub fn advice_commitments(&self) -> &[Vec<PCS::Commitment>] { &self.advice_commitments }
+}

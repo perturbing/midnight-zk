@@ -1,13 +1,23 @@
-use std::{hash::Hash, iter};
+use std::{fmt::Debug, hash::Hash, iter};
 
 use ff::{FromUniformBytes, WithSmallOrderMulGroup};
+use midnight_curves::pairing::MultiMillerLoop;
 
 use super::{vanishing, Error, VerifyingKey};
 use crate::{
     plonk::{evaluate_identities, traces::VerifierTrace},
-    poly::{commitment::PolynomialCommitmentScheme, CommitmentLabel, VerifierQuery},
+    poly::{
+        commitment::PolynomialCommitmentScheme,
+        kzg::{
+            gwc_multi_open_explicit, msm::DualMSM, GwcOpeningData, KZGCommitmentScheme,
+        },
+        CommitmentLabel, VerifierQuery,
+    },
     transcript::{read_n, Hashable, Sampleable, Transcript},
-    utils::arithmetic::compute_inner_product,
+    utils::{
+        arithmetic::{compute_inner_product, CurveAffine, CurveExt},
+        helpers::ProcessedSerdeObject,
+    },
 };
 
 /// Given a plonk proof, this function parses it to extract the verifying trace.
@@ -395,6 +405,272 @@ where
     // We are now convinced the circuit is satisfied so long as the
     // polynomial commitments open to the correct values.
     CS::multi_prepare(&queries, transcript).map_err(|_| Error::Opening)
+}
+
+/// KZG-specific variant of [`prepare`] that runs the full PLONK + GWC
+/// verification protocol and returns both the [`DualMSM`] accumulator *and*
+/// a [`GwcOpeningData`] record capturing every named intermediate value.
+///
+/// Use this when you want to inspect the individual GWC challenges, evaluations,
+/// and pairing inputs — for example, to document or re-implement the protocol
+/// in another language.
+///
+/// The verifier will error if there are trailing bytes in the transcript.
+pub fn prepare_with_gwc_data<F, E, T>(
+    vk: &VerifyingKey<F, KZGCommitmentScheme<E>>,
+    #[cfg(feature = "committed-instances")] committed_instances: &[&[E::G1]],
+    instances: &[&[&[F]]],
+    transcript: &mut T,
+) -> Result<(DualMSM<E>, GwcOpeningData<E>), Error>
+where
+    E: MultiMillerLoop + Debug,
+    T: Transcript,
+    F: WithSmallOrderMulGroup<3>
+        + Hashable<T::Hash>
+        + Sampleable<T::Hash>
+        + FromUniformBytes<64>
+        + Hash
+        + Ord
+        + std::fmt::Debug,
+    E: MultiMillerLoop<Fr = F>,
+    E::G1: Default + Hashable<T::Hash> + CurveExt<ScalarExt = F> + ProcessedSerdeObject,
+    E::G1Affine: Default + CurveAffine<ScalarExt = F, CurveExt = E::G1>,
+{
+    let trace = parse_trace(
+        vk,
+        #[cfg(feature = "committed-instances")]
+        committed_instances,
+        instances,
+        transcript,
+    )?;
+    prepare_with_gwc_data_from_trace(
+        vk,
+        trace,
+        #[cfg(feature = "committed-instances")]
+        committed_instances,
+        instances,
+        transcript,
+    )
+}
+
+/// Same as [`prepare_with_gwc_data`] but takes an already-parsed
+/// [`VerifierTrace`] (the result of [`parse_trace`]).
+pub fn prepare_with_gwc_data_from_trace<F, E, T>(
+    vk: &VerifyingKey<F, KZGCommitmentScheme<E>>,
+    trace: VerifierTrace<F, KZGCommitmentScheme<E>>,
+    #[cfg(feature = "committed-instances")] committed_instances: &[&[E::G1]],
+    instances: &[&[&[F]]],
+    transcript: &mut T,
+) -> Result<(DualMSM<E>, GwcOpeningData<E>), Error>
+where
+    E: MultiMillerLoop + Debug,
+    T: Transcript,
+    F: WithSmallOrderMulGroup<3>
+        + Hashable<T::Hash>
+        + Sampleable<T::Hash>
+        + FromUniformBytes<64>
+        + Hash
+        + Ord
+        + std::fmt::Debug,
+    E: MultiMillerLoop<Fr = F>,
+    E::G1: Default + Hashable<T::Hash> + CurveExt<ScalarExt = F> + ProcessedSerdeObject,
+    E::G1Affine: Default + CurveAffine<ScalarExt = F, CurveExt = E::G1>,
+{
+    #[cfg(not(feature = "committed-instances"))]
+    let committed_instances: Vec<Vec<E::G1>> = vec![vec![]; instances.len()];
+
+    if committed_instances.is_empty() {
+        return Err(Error::InvalidInstances);
+    }
+
+    let nb_committed_instances = committed_instances[0].len();
+    let num_proofs = instances.len();
+
+    let VerifierTrace {
+        advice_commitments,
+        vanishing,
+        lookups,
+        trashcans,
+        permutations,
+        challenges,
+        beta,
+        gamma,
+        theta,
+        trash_challenge,
+        y,
+    } = trace;
+
+    let vanishing = vanishing.read_commitments_after_y(vk, transcript)?;
+
+    // Sample x challenge, which is used to ensure the circuit is
+    // satisfied with high probability.
+    let x: F = transcript.squeeze_challenge();
+    let xn = x.pow_vartime([vk.n()]);
+
+    let instance_evals = {
+        let (min_rotation, max_rotation) =
+            vk.cs.instance_queries.iter().fold((0, 0), |(min, max), (_, rotation)| {
+                if rotation.0 < min {
+                    (rotation.0, max)
+                } else if rotation.0 > max {
+                    (min, rotation.0)
+                } else {
+                    (min, max)
+                }
+            });
+        let max_instance_len = instances
+            .iter()
+            .flat_map(|instance| instance.iter().map(|instance| instance.len()))
+            .max_by(Ord::cmp)
+            .unwrap_or_default();
+        let l_i_s = &vk.domain.l_i_range(
+            x,
+            xn,
+            -max_rotation..max_instance_len as i32 + min_rotation.abs(),
+        );
+        instances
+            .iter()
+            .map(|instances| {
+                vk.cs
+                    .instance_queries
+                    .iter()
+                    .map(|(column, rotation)| {
+                        if column.index() < nb_committed_instances {
+                            transcript.read()
+                        } else {
+                            let instances = instances[column.index() - nb_committed_instances];
+                            let offset = (max_rotation - rotation.0) as usize;
+                            Ok(compute_inner_product(
+                                instances,
+                                &l_i_s[offset..offset + instances.len()],
+                            ))
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+
+    let advice_evals = (0..num_proofs)
+        .map(|_| -> Result<Vec<_>, _> { read_n(transcript, vk.cs.advice_queries.len()) })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let fixed_evals = read_n(transcript, vk.cs.fixed_queries.len())?;
+    let vanishing = vanishing.evaluate_after_x(transcript)?;
+
+    let permutations_common = vk.permutation.evaluate(transcript)?;
+
+    let permutations_evaluated = permutations
+        .into_iter()
+        .map(|permutation| permutation.evaluate(transcript))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let lookups_evaluated = lookups
+        .into_iter()
+        .map(|lookups| -> Result<Vec<_>, _> {
+            lookups
+                .into_iter()
+                .map(|lookup| lookup.evaluate(transcript))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let trashcans_evaluated = trashcans
+        .into_iter()
+        .map(|trashcans| -> Result<Vec<_>, _> {
+            trashcans
+                .into_iter()
+                .map(|trash| trash.evaluate(transcript))
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // This check ensures the circuit is satisfied so long as the polynomial
+    // commitments open to the correct values.
+    let vanishing = evaluate_identities(
+        vk,
+        &fixed_evals,
+        &instance_evals,
+        &advice_evals,
+        &permutations_evaluated,
+        &lookups_evaluated,
+        &trashcans_evaluated,
+        &permutations_common,
+        x,
+        xn,
+        beta,
+        gamma,
+        theta,
+        trash_challenge,
+        &challenges,
+        y,
+        vanishing,
+    );
+
+    let queries = committed_instances
+        .iter()
+        .zip(instance_evals.iter())
+        .zip(advice_commitments.iter())
+        .zip(advice_evals.iter())
+        .zip(permutations_evaluated.iter())
+        .zip(lookups_evaluated.iter())
+        .zip(trashcans_evaluated.iter())
+        .flat_map(
+            |(
+                (
+                    (
+                        (((committed_instances, instance_evals), advice_commitments), advice_evals),
+                        permutation,
+                    ),
+                    lookups,
+                ),
+                trash,
+            )| {
+                iter::empty()
+                    .chain(vk.cs.advice_queries.iter().enumerate().map(
+                        move |(query_index, &(column, at))| {
+                            VerifierQuery::new(
+                                vk.domain.rotate_omega(x, at),
+                                CommitmentLabel::Advice(column.index()),
+                                &advice_commitments[column.index()],
+                                advice_evals[query_index],
+                            )
+                        },
+                    ))
+                    .chain(vk.cs.instance_queries.iter().enumerate().filter_map(
+                        move |(query_index, &(column, at))| {
+                            if column.index() < nb_committed_instances {
+                                Some(VerifierQuery::new(
+                                    vk.domain.rotate_omega(x, at),
+                                    CommitmentLabel::Instance(column.index()),
+                                    &committed_instances[column.index()],
+                                    instance_evals[query_index],
+                                ))
+                            } else {
+                                None
+                            }
+                        },
+                    ))
+                    .chain(permutation.queries(vk, x))
+                    .chain(lookups.iter().flat_map(move |p| p.queries(vk, x)))
+                    .chain(trash.iter().flat_map(move |p| p.queries(x)))
+            },
+        )
+        .chain(
+            vk.cs.fixed_queries.iter().enumerate().map(|(query_index, &(column, at))| {
+                VerifierQuery::new(
+                    vk.domain.rotate_omega(x, at),
+                    CommitmentLabel::Fixed(column.index()),
+                    &vk.fixed_commitments[column.index()],
+                    fixed_evals[query_index],
+                )
+            }),
+        )
+        .chain(permutations_common.queries(&vk.permutation, x))
+        .chain(vanishing.queries(x, vk.n()))
+        .collect::<Vec<_>>();
+
+    gwc_multi_open_explicit(&queries, transcript).map_err(|_| Error::Opening)
 }
 
 /// Prepares a plonk proof into a PCS instance that can be finalized or
