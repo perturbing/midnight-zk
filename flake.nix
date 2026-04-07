@@ -3,6 +3,7 @@
     fenix.url = "github:nix-community/fenix";
     flake-parts.url = "github:hercules-ci/flake-parts";
     import-tree.url = "github:vic/import-tree";
+    aiken.url = "github:aiken-lang/aiken";
     naersk.url = "github:nix-community/naersk";
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
   };

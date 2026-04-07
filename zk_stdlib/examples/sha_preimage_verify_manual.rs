@@ -325,7 +325,7 @@ fn step4_parse_trace(t: &mut ProofTranscript, pi: &[Fq])
     let y = t.squeeze_fq();
 
     println!("Step 4: Fiat-Shamir challenges — theta={theta:?}  beta={beta:?}  gamma={gamma:?}");
-    println!("        y={y:?}  trash_challenge={trash:?}");
+    println!("        trash_challenge={trash:?}  y={y:?}");
     println!("        advice_coms: {}  perm_prod_coms: {}  lookup_coms: {}+{}",
         advice_coms.len(), perm_prod_coms.len(), lp_input_coms.len(), lp_prod_coms.len());
 

@@ -120,7 +120,7 @@ The sequence is:
 | (f) | Read + Absorb | permutation product commitments `Zσ = [zσ(τ)]G₁` |
 | (g) | Read + Absorb | lookup product commitments |
 | — | **Squeeze** | **trash\_challenge** |
-| (h) | Read + Absorb | trashcan commitments (none in SHA circuit) |
+| (h) | Read + Absorb | trashcan commitments (none in SHA circuit; 0 reads) |
 | (i) | Read + Absorb | vanishing random poly commitment `R = [r(τ)]G₁` |
 | — | **Squeeze** | **y** |
 

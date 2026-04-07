@@ -18,6 +18,12 @@
       version = cargoToml.package.version or "0.1.0";
 
     in rec {
+      devShells.default = pkgs.mkShell {
+        buildInputs = [
+          inputs.aiken.packages.${system}.aiken
+        ];
+      };
+
       packages.default = naersk'.buildPackage {
         src = lib.cleanSource "${self}";
         stdenv = pkgs.stdenv;
