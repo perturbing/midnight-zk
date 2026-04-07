@@ -146,7 +146,7 @@ fn main() {
     println!("input  = {}", witness.iter().map(|b| format!("{b:02x}")).collect::<String>());
     println!("SHA-256 = {}", instance.iter().map(|b| format!("{b:02x}")).collect::<String>());
 
-    let proof = midnight_zk_stdlib::prove::<ShaPreImageCircuit, blake2b_simd::State>(
+    let proof = midnight_zk_stdlib::prove::<ShaPreImageCircuit, midnight_zk_stdlib::plutus_transcript::PlutusBlake2b>(
         &srs, &pk, &relation, &instance, witness, OsRng,
     )
     .expect("Proof generation should not fail");
@@ -179,7 +179,7 @@ fn main() {
     }
 
     assert!(
-        midnight_zk_stdlib::verify::<ShaPreImageCircuit, blake2b_simd::State>(
+        midnight_zk_stdlib::verify::<ShaPreImageCircuit, midnight_zk_stdlib::plutus_transcript::PlutusBlake2b>(
             &srs.verifier_params(),
             &vk,
             &instance,

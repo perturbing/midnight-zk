@@ -7,14 +7,18 @@
 //!
 //! Run `cargo run --example sha_preimage` first to generate the artifact files.
 //!
-//! # Transcript protocol (Blake2b-512)
+//! # Transcript protocol (PlutusBlake2b — accumulation-based Blake2b-256)
 //!
 //! ```text
-//! key     = b"Domain separator for transcript"
-//! absorb  : state.update(&[0x01]); state.update(data)
-//! squeeze : state.update(&[0x00]); output = state.finalize()  (64 bytes)
+//! absorb  : transcript_data.extend(data)    (no prefix)
+//! squeeze : h1 = blake2b_256([0x00] ++ transcript_data)
+//!           h2 = blake2b_256([0x01] ++ transcript_data)
+//!           output = h1 ++ h2   (64 bytes)
 //! to_fq   : Fq::from_uniform_bytes(&output[..64])
 //! ```
+//!
+//! transcript_data is NOT reset after a squeeze; each squeeze independently
+//! hashes all data absorbed so far.
 //!
 //! G1 commitments are absorbed as 48-byte compressed encodings.
 //! Fq elements are absorbed as 32-byte little-endian canonical encodings.
@@ -25,6 +29,7 @@
 //! They are fixed for this specific circuit configuration and hardcoded here.
 
 use blake2b_simd::Params as Blake2bParams;
+use midnight_zk_stdlib::plutus_transcript::PlutusBlake2b;
 use ff::{Field, FromUniformBytes, PrimeField};
 use group::{prime::PrimeCurveAffine, Curve, Group, GroupEncoding};
 use midnight_curves::{
@@ -79,29 +84,26 @@ const ZKSTD_ARCH_BYTES: usize = 16;
 
 // ── Transcript ────────────────────────────────────────────────────────────────
 
-/// Blake2b-512 Fiat-Shamir sponge used in the PLONK proof system.
+/// PlutusBlake2b Fiat-Shamir sponge used in the PLONK proof system.
 ///
-/// Absorb calls prefix data with 0x01; squeeze calls prefix with 0x00 before
-/// finalizing the hash.  The key is "Domain separator for transcript".
+/// Absorb appends data directly to the accumulator (no prefix).
+/// Squeeze hashes the full accumulator twice with different prefix bytes
+/// (0x00 and 0x01) using keyless Blake2b-256, concatenating the 32-byte
+/// outputs to produce 64 bytes of entropy.  The accumulator is NOT reset.
 struct ProofTranscript {
-    state: blake2b_simd::State,
+    transcript_data: Vec<u8>,
     proof: Vec<u8>,
     pos: usize,
 }
 
 impl ProofTranscript {
     fn new(proof: &[u8]) -> Self {
-        let state = Blake2bParams::new()
-            .hash_length(64)
-            .key(b"Domain separator for transcript")
-            .to_state();
-        ProofTranscript { state, proof: proof.to_vec(), pos: 0 }
+        ProofTranscript { transcript_data: vec![], proof: proof.to_vec(), pos: 0 }
     }
 
-    /// Absorb raw bytes: prefix with 0x01 then data.
+    /// Absorb raw bytes: append directly to transcript accumulator.
     fn absorb(&mut self, data: &[u8]) {
-        self.state.update(&[0x01]);
-        self.state.update(data);
+        self.transcript_data.extend_from_slice(data);
     }
 
     /// Absorb a 32-byte canonical Fq representation.
@@ -115,11 +117,17 @@ impl ProofTranscript {
     }
 
     /// Squeeze 64 bytes and convert to Fq via from_uniform_bytes.
+    ///
+    /// h1 = blake2b_256([0x00] ++ transcript_data)
+    /// h2 = blake2b_256([0x01] ++ transcript_data)
     fn squeeze_fq(&mut self) -> Fq {
-        self.state.update(&[0x00]);
-        let out = self.state.finalize();
+        let h1 = Blake2bParams::new().hash_length(32).to_state()
+            .update(&[0x00]).update(&self.transcript_data).finalize();
+        let h2 = Blake2bParams::new().hash_length(32).to_state()
+            .update(&[0x01]).update(&self.transcript_data).finalize();
         let mut bytes = [0u8; 64];
-        bytes.copy_from_slice(out.as_bytes());
+        bytes[..32].copy_from_slice(h1.as_bytes());
+        bytes[32..].copy_from_slice(h2.as_bytes());
         Fq::from_uniform_bytes(&bytes)
     }
 
@@ -808,7 +816,7 @@ fn main() {
     // TODO: inline SHA gate polynomial evaluation from
     //   midnight_circuits/src/hash/sha256/ to remove this library dependency.
     let gwc: GwcOpeningData<Bls12> = {
-        let mut lib_t = CircuitTranscript::<blake2b_simd::State>::init_from_bytes(&proof_bytes);
+        let mut lib_t = CircuitTranscript::<PlutusBlake2b>::init_from_bytes(&proof_bytes);
         let trace = parse_trace(
             vk,
             &[&[G1Projective::identity()]],

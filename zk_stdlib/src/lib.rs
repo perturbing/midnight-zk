@@ -27,6 +27,7 @@
 //!   receives a new proof.
 
 mod external;
+pub mod plutus_transcript;
 pub mod utils;
 
 use std::{cell::RefCell, cmp::max, convert::TryInto, fmt::Debug, io, rc::Rc};

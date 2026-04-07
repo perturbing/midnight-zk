@@ -148,3 +148,4 @@ impl Sampleable<Blake2bState> for midnight_curves::Fq {
         midnight_curves::Fq::from_uniform_bytes(&bytes)
     }
 }
+
