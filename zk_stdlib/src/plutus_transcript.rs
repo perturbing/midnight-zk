@@ -2,14 +2,15 @@
 //!
 //! Absorption accumulates all transcript data in a `Vec<u8>`.  Squeezing hashes
 //! the accumulated transcript data with a single keyless Blake2b-256 call and
-//! immediately extends the transcript state with the 32-byte output, so that
-//! consecutive squeezes automatically produce distinct outputs through state
-//! feedback rather than domain-separation prefix bytes.
+//! replaces the transcript state with the 32-byte output, so that the state
+//! remains a constant 32 bytes after the first squeeze and consecutive squeezes
+//! produce distinct outputs through state feedback rather than domain-separation
+//! prefix bytes.
 //!
 //! On-chain (Plutus), each squeeze is exactly one `blake2b_256` built-in call:
 //! ```text
 //! challenge_bytes = blake2b_256(transcript_data)
-//! transcript_data = transcript_data ++ challenge_bytes
+//! transcript_data = challenge_bytes          -- replace, not append
 //! ```
 
 use std::{io, io::Read};
@@ -49,7 +50,7 @@ impl TranscriptHash for PlutusBlake2b {
 
     fn squeeze(&mut self) -> Self::Output {
         let h = blake2b_256(&self.transcript_data);
-        self.transcript_data.extend_from_slice(&h);
+        self.transcript_data = h.to_vec();
         h.to_vec()
     }
 }
