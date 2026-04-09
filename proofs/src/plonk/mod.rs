@@ -109,6 +109,65 @@ where
         Ok(())
     }
 
+    /// Writes a self-contained Plutus-friendly verifying key to a buffer.
+    ///
+    /// The binary layout is:
+    /// 1. The existing `write()` output verbatim (version, k, fixed commitments, permutation commitments).
+    /// 2. `transcript_repr`: 32 bytes (field element in canonical representation).
+    /// 3. `blinding_factors`: u32 LE.
+    /// 4. `num_advice_columns`: u32 LE.
+    /// 5. `num_perm_columns`: u32 LE (number of columns in the permutation argument).
+    /// 6. `cs_degree`: u32 LE (chunk_size = cs_degree - 2, num_h_pieces = cs_degree - 1).
+    /// 7. `num_lookups`: u32 LE.
+    /// 8. `num_advice_queries`: u32 LE.
+    /// 9. `advice_queries`: (col_idx u32 LE, rotation i32 LE) × num_advice_queries.
+    /// 10. `num_fixed_queries`: u32 LE.
+    /// 11. `fixed_queries`: (col_idx u32 LE, rotation i32 LE) × num_fixed_queries.
+    ///
+    /// This is sufficient for an on-chain Plutus verifier to reconstruct everything
+    /// it needs without re-running `circuit.configure()`.
+    pub fn write_plutus_vk<W: io::Write>(&self, writer: &mut W, format: SerdeFormat) -> io::Result<()> {
+        // 1. Existing VK bytes (version, k, fixed commitments, permutation commitments).
+        self.write(writer, format)?;
+
+        // 2. transcript_repr: 32 bytes (canonical field representation).
+        writer.write_all(self.transcript_repr.to_repr().as_ref())?;
+
+        // 3. blinding_factors: u32 LE.
+        writer.write_all(&(self.cs.blinding_factors() as u32).to_le_bytes())?;
+
+        // 4. num_advice_columns: u32 LE.
+        writer.write_all(&(self.cs.num_advice_columns() as u32).to_le_bytes())?;
+
+        // 5. num_perm_columns: u32 LE.
+        let num_perm_columns = self.cs.permutation().columns.len();
+        writer.write_all(&(num_perm_columns as u32).to_le_bytes())?;
+
+        // 6. cs_degree: u32 LE.
+        writer.write_all(&(self.cs_degree as u32).to_le_bytes())?;
+
+        // 7. num_lookups: u32 LE.
+        writer.write_all(&(self.cs.lookups().len() as u32).to_le_bytes())?;
+
+        // 8-9. advice_queries.
+        let advice_queries = self.cs.advice_queries();
+        writer.write_all(&(advice_queries.len() as u32).to_le_bytes())?;
+        for (col, rot) in advice_queries {
+            writer.write_all(&(col.index() as u32).to_le_bytes())?;
+            writer.write_all(&rot.0.to_le_bytes())?;
+        }
+
+        // 10-11. fixed_queries.
+        let fixed_queries = self.cs.fixed_queries();
+        writer.write_all(&(fixed_queries.len() as u32).to_le_bytes())?;
+        for (col, rot) in fixed_queries {
+            writer.write_all(&(col.index() as u32).to_le_bytes())?;
+            writer.write_all(&rot.0.to_le_bytes())?;
+        }
+
+        Ok(())
+    }
+
     /// Reads a verification key from a buffer for the associated [Circuit].
     ///
     /// Reads a curve element from the buffer and parses it according to the
