@@ -1,15 +1,15 @@
 //! Accumulation-based Blake2b-256 transcript for Plutus on-chain compatibility.
 //!
-//! Absorption accumulates all transcript data in a `Vec<u8>`.  Squeezing calls
-//! keyless Blake2b-256 twice with a single domain-separation byte prepended (0
-//! and 1), concatenating the two 32-byte outputs to obtain 64 bytes of entropy
-//! for `Sampleable::sample`.
+//! Absorption accumulates all transcript data in a `Vec<u8>`.  Squeezing hashes
+//! the accumulated transcript data with a single keyless Blake2b-256 call and
+//! immediately extends the transcript state with the 32-byte output, so that
+//! consecutive squeezes automatically produce distinct outputs through state
+//! feedback rather than domain-separation prefix bytes.
 //!
-//! On-chain (Plutus), each squeeze is exactly two `blake2b_256` built-in calls:
+//! On-chain (Plutus), each squeeze is exactly one `blake2b_256` built-in call:
 //! ```text
-//! h1 = blake2b_256(0x00 ++ transcript_data)
-//! h2 = blake2b_256(0x01 ++ transcript_data)
-//! challenge_bytes = h1 ++ h2
+//! challenge_bytes = blake2b_256(transcript_data)
+//! transcript_data = transcript_data ++ challenge_bytes
 //! ```
 
 use std::{io, io::Read};
@@ -20,12 +20,9 @@ use group::GroupEncoding;
 use midnight_curves::{Fq, G1Projective};
 use midnight_proofs::transcript::{Hashable, Sampleable, TranscriptHash};
 
-/// Keyless Blake2b-256 hash of `[prefix] ++ data`.
-fn blake2b_256_with_prefix(data: &[u8], prefix: u8) -> [u8; 32] {
-    let mut input = Vec::with_capacity(1 + data.len());
-    input.push(prefix);
-    input.extend_from_slice(data);
-    let hash = Params::new().hash_length(32).to_state().update(&input).finalize();
+/// Keyless Blake2b-256 hash of `data`.
+fn blake2b_256(data: &[u8]) -> [u8; 32] {
+    let hash = Params::new().hash_length(32).to_state().update(data).finalize();
     let mut out = [0u8; 32];
     out.copy_from_slice(hash.as_bytes());
     out
@@ -51,9 +48,9 @@ impl TranscriptHash for PlutusBlake2b {
     }
 
     fn squeeze(&mut self) -> Self::Output {
-        let h1 = blake2b_256_with_prefix(&self.transcript_data, 0);
-        let h2 = blake2b_256_with_prefix(&self.transcript_data, 1);
-        [h1.as_slice(), h2.as_slice()].concat()
+        let h = blake2b_256(&self.transcript_data);
+        self.transcript_data.extend_from_slice(&h);
+        h.to_vec()
     }
 }
 
@@ -93,10 +90,9 @@ impl Hashable<PlutusBlake2b> for Fq {
 
 impl Sampleable<PlutusBlake2b> for Fq {
     fn sample(hash_output: Vec<u8>) -> Self {
-        assert!(hash_output.len() <= 64);
-        assert!(hash_output.len() >= (Fq::NUM_BITS as usize / 8) + 12);
+        assert_eq!(hash_output.len(), 32);
         let mut bytes = [0u8; 64];
-        bytes[..hash_output.len()].copy_from_slice(&hash_output);
+        bytes[..32].copy_from_slice(&hash_output);
         Fq::from_uniform_bytes(&bytes)
     }
 }
