@@ -102,7 +102,7 @@ macro_rules! plonk_api {
                 let start = Instant::now();
                 let proof = {
                     let mut transcript = CircuitTranscript::init();
-                    create_proof::<
+                    let _ = create_proof::<
                         $native,
                         KZGCommitmentScheme<$engine>,
                         CircuitTranscript<H>,
@@ -126,6 +126,39 @@ macro_rules! plonk_api {
                 };
 
                 Ok(proof)
+            }
+
+            /// PLONK proving algorithm returning proof bytes and the gate polynomial
+            /// evaluation h(x) at the challenge point, for use by an on-chain Plutus verifier.
+            pub fn prove_plutus<H>(
+                params: &ParamsKZG<$engine>,
+                pk: &ProvingKey<$native, KZGCommitmentScheme<$engine>>,
+                circuit: &Relation,
+                nb_instance_commitments: usize,
+                pi: &[&[$native]],
+                rng: impl RngCore + CryptoRng,
+            ) -> Result<(Vec<u8>, $native), Error>
+            where
+                H: TranscriptHash,
+                $projective: Hashable<H>,
+                $native: Hashable<H> + Sampleable<H>,
+            {
+                let mut transcript = CircuitTranscript::init();
+                let h_eval = create_proof::<
+                    $native,
+                    KZGCommitmentScheme<$engine>,
+                    CircuitTranscript<H>,
+                    Relation,
+                >(
+                    params,
+                    pk,
+                    std::slice::from_ref(circuit),
+                    nb_instance_commitments,
+                    &[pi],
+                    rng,
+                    &mut transcript,
+                )?;
+                Ok((transcript.finalize(), h_eval))
             }
 
             /// PLONK verification algorithm.

@@ -29,7 +29,7 @@ pub(crate) struct Constructed<F: PrimeField> {
 }
 
 pub(crate) struct Evaluated<F: PrimeField> {
-    h_poly: Polynomial<F, Coeff>,
+    pub(crate) h_poly: Polynomial<F, Coeff>,
     committed: Committed<F>,
 }
 

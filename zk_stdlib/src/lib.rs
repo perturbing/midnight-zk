@@ -1790,6 +1790,39 @@ where
     )
 }
 
+/// Produces a proof of relation `R` for the given instance, also returning the
+/// gate polynomial evaluation h(x) at the challenge point for use by an on-chain
+/// Plutus verifier.
+pub fn prove_plutus<R: Relation, H: TranscriptHash>(
+    params: &ParamsKZG<midnight_curves::Bls12>,
+    pk: &MidnightPK<R>,
+    relation: &R,
+    instance: &R::Instance,
+    witness: R::Witness,
+    rng: impl RngCore + CryptoRng,
+) -> Result<(Vec<u8>, F), Error>
+where
+    G1Projective: Hashable<H>,
+    F: Hashable<H> + Sampleable<H>,
+{
+    let pi = R::format_instance(instance)?;
+    let com_inst = R::format_committed_instances(&witness);
+    let circuit = MidnightCircuit::new(
+        relation,
+        Value::known(instance.clone()),
+        Value::known(witness),
+        Some(pk.k as u32),
+    );
+    BlstPLONK::<MidnightCircuit<R>>::prove_plutus::<H>(
+        params,
+        &pk.pk,
+        &circuit,
+        1,
+        &[com_inst.as_slice(), &pi],
+        rng,
+    )
+}
+
 /// Verifies the given proof of relation `R` with respect to the given instance.
 /// Returns `Ok(())` if the proof is valid.
 pub fn verify<R: Relation, H: TranscriptHash>(

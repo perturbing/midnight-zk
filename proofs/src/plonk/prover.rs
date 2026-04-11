@@ -250,7 +250,7 @@ pub(crate) fn finalise_proof<'a, F, CS: PolynomialCommitmentScheme<F>, T: Transc
     trace: ProverTrace<F>,
     transcript: &mut T,
     rng: impl RngCore,
-) -> Result<(), Error>
+) -> Result<F, Error>
 where
     CS::Commitment: Hashable<T::Hash>,
     F: WithSmallOrderMulGroup<3>
@@ -292,6 +292,7 @@ where
     )?;
 
     let vanishing = vanishing.evaluate(x, domain, transcript)?;
+    let h_eval = eval_polynomial(&vanishing.h_poly, x);
 
     // Evaluate common permutation data
     pk.permutation.evaluate(x, transcript)?;
@@ -336,7 +337,8 @@ where
         x,
     );
 
-    CS::multi_open(params, &queries, transcript).map_err(|_| Error::ConstraintSystemFailure)
+    CS::multi_open(params, &queries, transcript).map_err(|_| Error::ConstraintSystemFailure)?;
+    Ok(h_eval)
 }
 
 /// This creates a proof for the provided `circuit` when given the public
@@ -359,7 +361,7 @@ pub fn create_proof<
     instances: &[&[&[F]]],
     mut rng: impl RngCore + CryptoRng,
     transcript: &mut T,
-) -> Result<(), Error>
+) -> Result<F, Error>
 where
     CS::Commitment: Hashable<T::Hash>,
     F: WithSmallOrderMulGroup<3>
@@ -379,7 +381,7 @@ where
         &mut rng,
         transcript,
     )?;
-    finalise_proof(
+    let h_eval = finalise_proof(
         params,
         pk,
         #[cfg(feature = "committed-instances")]
@@ -387,7 +389,8 @@ where
         trace,
         transcript,
         rng,
-    )
+    )?;
+    Ok(h_eval)
 }
 
 pub(super) fn compute_instances<F, CS, T>(
