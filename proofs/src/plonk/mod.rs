@@ -123,10 +123,14 @@ where
     /// 9. `advice_queries`: (col_idx u32 LE, rotation i32 LE) × num_advice_queries.
     /// 10. `num_fixed_queries`: u32 LE.
     /// 11. `fixed_queries`: (col_idx u32 LE, rotation i32 LE) × num_fixed_queries.
+    /// 12. `s_g2_bytes`: [s]G₂ from the KZG trusted setup (caller-supplied, typically 96 bytes compressed G2).
+    /// 13. `omega`: primitive 2^K-th root of unity (32 bytes, Fq canonical LE).
+    ///
+    /// Pass `s_g2_bytes` as `params.s_g2().to_bytes().as_ref()` from your `ParamsKZG`.
     ///
     /// This is sufficient for an on-chain Plutus verifier to reconstruct everything
     /// it needs without re-running `circuit.configure()`.
-    pub fn write_plutus_vk<W: io::Write>(&self, writer: &mut W, format: SerdeFormat) -> io::Result<()> {
+    pub fn write_plutus_vk<W: io::Write>(&self, writer: &mut W, format: SerdeFormat, s_g2_bytes: &[u8]) -> io::Result<()> {
         // 1. Existing VK bytes (version, k, fixed commitments, permutation commitments).
         self.write(writer, format)?;
 
@@ -164,6 +168,12 @@ where
             writer.write_all(&(col.index() as u32).to_le_bytes())?;
             writer.write_all(&rot.0.to_le_bytes())?;
         }
+
+        // sG2: [s]G₂ from the KZG trusted setup (96 bytes, compressed G2)
+        writer.write_all(s_g2_bytes)?;
+
+        // omega: primitive 2^K-th root of unity (32 bytes, Fq canonical LE)
+        writer.write_all(self.domain.get_omega().to_repr().as_ref())?;
 
         Ok(())
     }
