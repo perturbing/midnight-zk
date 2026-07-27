@@ -68,10 +68,20 @@ pub struct VerifyingKey<F: PrimeField, CS: PolynomialCommitmentScheme<F>> {
     cs_degree: usize,
     /// The representative of this `VerifyingKey` in transcripts.
     transcript_repr: F,
+    /// The selector activations that were compressed into shared fixed columns
+    /// during keygen. Empty unless the key was generated with selector
+    /// compression; serialized so that deserialization can replay the
+    /// (activation-dependent) compression and recover the same constraint
+    /// system.
+    selector_activations: Vec<Vec<bool>>,
 }
 
 // Current version of the VK
 const VERSION: u8 = 0x03;
+// Version byte of VKs whose selectors were compressed into shared fixed
+// columns. Such VKs additionally serialize the selector activations, which
+// are needed to replay the compression on deserialization.
+const VERSION_COMPRESSED: u8 = 0x04;
 
 impl<F, CS> VerifyingKey<F, CS>
 where
@@ -94,11 +104,27 @@ where
     ///   reduction.
     pub fn write<W: io::Write>(&self, writer: &mut W, format: SerdeFormat) -> io::Result<()> {
         // Version byte that will be checked on read.
-        writer.write_all(&[VERSION])?;
+        if self.cs.selectors_compressed {
+            writer.write_all(&[VERSION_COMPRESSED])?;
+        } else {
+            writer.write_all(&[VERSION])?;
+        }
         let k = &self.domain.k();
         assert!(*k <= F::S);
         // k value fits in 1 byte
         writer.write_all(&[*k as u8])?;
+        if self.cs.selectors_compressed {
+            writer.write_all(&(self.selector_activations.len() as u32).to_le_bytes())?;
+            for activations in &self.selector_activations {
+                let mut bytes = vec![0u8; activations.len().div_ceil(8)];
+                for (i, b) in activations.iter().enumerate() {
+                    if *b {
+                        bytes[i / 8] |= 1 << (i % 8);
+                    }
+                }
+                writer.write_all(&bytes)?;
+            }
+        }
         writer.write_all(&(self.fixed_commitments.len() as u32).to_le_bytes())?;
         for commitment in &self.fixed_commitments {
             commitment.write(writer, format)?;
@@ -156,12 +182,16 @@ where
     ) -> io::Result<Self> {
         let mut version_byte = [0u8; 1];
         reader.read_exact(&mut version_byte)?;
-        if VERSION != version_byte[0] {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unexpected version byte",
-            ));
-        }
+        let selectors_compressed = match version_byte[0] {
+            VERSION => false,
+            VERSION_COMPRESSED => true,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "unexpected version byte",
+                ))
+            }
+        };
 
         let mut k = [0u8; 1];
         reader.read_exact(&mut k)?;
@@ -174,6 +204,32 @@ where
         }
 
         let domain = EvaluationDomain::new(cs.degree() as u32, k.into());
+
+        let selector_activations = if selectors_compressed {
+            let mut num_selectors = [0u8; 4];
+            reader.read_exact(&mut num_selectors)?;
+            let num_selectors = u32::from_le_bytes(num_selectors) as usize;
+            if num_selectors != cs.num_selectors {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "expected {} selectors, the verifying key has {}",
+                        cs.num_selectors, num_selectors
+                    ),
+                ));
+            }
+            let n = domain.n as usize;
+            let mut selector_activations = Vec::with_capacity(num_selectors);
+            for _ in 0..num_selectors {
+                let mut bytes = vec![0u8; n.div_ceil(8)];
+                reader.read_exact(&mut bytes)?;
+                selector_activations
+                    .push((0..n).map(|i| (bytes[i / 8] >> (i % 8)) & 1 == 1).collect::<Vec<_>>());
+            }
+            selector_activations
+        } else {
+            vec![]
+        };
 
         let mut num_fixed_columns = [0u8; 4];
         reader.read_exact(&mut num_fixed_columns)?;
@@ -189,10 +245,25 @@ where
         let permutation = permutation::VerifyingKey::read(reader, &cs.permutation, format)?;
 
         // we still need to replace selectors with fixed Expressions in `cs`
-        let fake_selectors = vec![vec![]; cs.num_selectors];
-        let (cs, _) = cs.directly_convert_selectors_to_fixed(fake_selectors);
+        let cs = if selectors_compressed {
+            // The column allocation of compressed selectors depends on their
+            // activations, so replay the compression with the activations that
+            // were serialized alongside the key.
+            cs.compress_selectors(selector_activations.clone()).0
+        } else {
+            // Direct conversion is activation-independent, so placeholder
+            // activations suffice to rewrite the expressions in `cs`.
+            let fake_selectors = vec![vec![]; cs.num_selectors];
+            cs.directly_convert_selectors_to_fixed(fake_selectors).0
+        };
 
-        Ok(Self::from_parts(domain, fixed_commitments, permutation, cs))
+        Ok(Self::from_parts(
+            domain,
+            fixed_commitments,
+            permutation,
+            cs,
+            selector_activations,
+        ))
     }
 
     /// Writes a verifying key to a vector of bytes using [`Self::write`].
@@ -220,8 +291,14 @@ where
 impl<F: WithSmallOrderMulGroup<3>, CS: PolynomialCommitmentScheme<F>> VerifyingKey<F, CS> {
     /// Return the bytes_length of a VerifyingKey
     pub fn bytes_length(&self, format: SerdeFormat) -> usize {
+        let selector_activations_length = if self.cs.selectors_compressed {
+            4 + self.selector_activations.iter().map(|a| a.len().div_ceil(8)).sum::<usize>()
+        } else {
+            0
+        };
         // 6 bytes of headers: version (1), k (1) and fixed commitment count (4).
-        6 + (self.fixed_commitments.iter().map(|c| c.byte_length(format)).sum::<usize>())
+        6 + selector_activations_length
+            + (self.fixed_commitments.iter().map(|c| c.byte_length(format)).sum::<usize>())
             + self.permutation.bytes_length(format)
     }
 
@@ -230,6 +307,7 @@ impl<F: WithSmallOrderMulGroup<3>, CS: PolynomialCommitmentScheme<F>> VerifyingK
         fixed_commitments: Vec<CS::Commitment>,
         permutation: permutation::VerifyingKey<F, CS>,
         cs: ConstraintSystem<F>,
+        selector_activations: Vec<Vec<bool>>,
     ) -> Self
     where
         F: FromUniformBytes<64>,
@@ -245,6 +323,7 @@ impl<F: WithSmallOrderMulGroup<3>, CS: PolynomialCommitmentScheme<F>> VerifyingK
             cs_degree,
             // Temporary, this is not pinned.
             transcript_repr: F::ZERO,
+            selector_activations,
         };
 
         let mut hasher =
@@ -252,7 +331,11 @@ impl<F: WithSmallOrderMulGroup<3>, CS: PolynomialCommitmentScheme<F>> VerifyingK
 
         // We serialise the commitments of the VK to get the `transcript_repr`.
         let mut buffer = Vec::new();
-        buffer.push(VERSION);
+        buffer.push(if vk.cs.selectors_compressed {
+            VERSION_COMPRESSED
+        } else {
+            VERSION
+        });
         let k = &vk.domain.k();
         assert!(*k <= F::S);
         buffer.push(*k as u8);

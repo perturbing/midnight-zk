@@ -223,11 +223,72 @@ where
     keygen_vk_with_k(params, circuit, k)
 }
 
+/// Generates a `VerifyingKey` from a `Circuit` instance, compressing
+/// mutually-exclusive selectors into shared fixed columns.
+///
+/// Compared to [keygen_vk], this reduces the number of fixed columns (and thus
+/// fixed commitments in the verifying key), at the cost of higher-degree gate
+/// expressions (within the constraint-system degree bound). The resulting
+/// verifying key (including its `transcript_repr`) and all proofs differ from
+/// the ones produced without compression, so provers and verifiers must agree
+/// on whether compression is used.
+///
+/// Automatically determines the smallest `k` required for the given circuit
+/// and adjusts the received parameters to match the circuit's size.
+/// Use `keygen_vk_with_k_and_compression` to specify a custom `k` value.
+pub fn keygen_vk_with_compression<F, CS, ConcreteCircuit>(
+    params: &CS::Parameters,
+    circuit: &ConcreteCircuit,
+) -> Result<VerifyingKey<F, CS>, Error>
+where
+    F: WithSmallOrderMulGroup<3> + FromUniformBytes<64> + Ord,
+    CS: PolynomialCommitmentScheme<F>,
+    ConcreteCircuit: Circuit<F>,
+{
+    let k = k_from_circuit(circuit);
+
+    if params.max_k() != k {
+        return Err(Error::SrsError(params.max_k() as usize, k as usize));
+    }
+
+    keygen_vk_with_k_and_compression(params, circuit, k)
+}
+
 /// Generate a `VerifyingKey` from an instance of `Circuit`.
 pub fn keygen_vk_with_k<F, CS, ConcreteCircuit>(
     params: &CS::Parameters,
     circuit: &ConcreteCircuit,
     k: u32,
+) -> Result<VerifyingKey<F, CS>, Error>
+where
+    F: WithSmallOrderMulGroup<3> + FromUniformBytes<64> + Ord,
+    CS: PolynomialCommitmentScheme<F>,
+    ConcreteCircuit: Circuit<F>,
+{
+    keygen_vk_with_k_inner(params, circuit, k, false)
+}
+
+/// Generate a `VerifyingKey` from an instance of `Circuit`, compressing
+/// mutually-exclusive selectors into shared fixed columns (see
+/// [keygen_vk_with_compression]).
+pub fn keygen_vk_with_k_and_compression<F, CS, ConcreteCircuit>(
+    params: &CS::Parameters,
+    circuit: &ConcreteCircuit,
+    k: u32,
+) -> Result<VerifyingKey<F, CS>, Error>
+where
+    F: WithSmallOrderMulGroup<3> + FromUniformBytes<64> + Ord,
+    CS: PolynomialCommitmentScheme<F>,
+    ConcreteCircuit: Circuit<F>,
+{
+    keygen_vk_with_k_inner(params, circuit, k, true)
+}
+
+fn keygen_vk_with_k_inner<F, CS, ConcreteCircuit>(
+    params: &CS::Parameters,
+    circuit: &ConcreteCircuit,
+    k: u32,
+    compress_selectors: bool,
 ) -> Result<VerifyingKey<F, CS>, Error>
 where
     F: WithSmallOrderMulGroup<3> + FromUniformBytes<64> + Ord,
@@ -271,7 +332,18 @@ where
     // After this, the ConstraintSystem should not have any selectors: `verify` does
     // not need them, and `keygen_pk` regenerates `cs` from scratch anyways.
     let selectors = std::mem::take(&mut assembly.selectors);
-    let (cs, selector_polys) = cs.directly_convert_selectors_to_fixed(selectors);
+    // With compression, the selector activations are kept in the verifying key
+    // so that deserialization can replay the (activation-dependent) conversion.
+    let selector_activations = if compress_selectors {
+        selectors.clone()
+    } else {
+        vec![]
+    };
+    let (cs, selector_polys) = if compress_selectors {
+        cs.compress_selectors(selectors)
+    } else {
+        cs.directly_convert_selectors_to_fixed(selectors)
+    };
     fixed.extend(selector_polys.into_iter().map(|poly| domain.lagrange_from_vec(poly)));
 
     let permutation_vk = assembly.permutation.build_vk(params, &domain, &cs.permutation);
@@ -287,6 +359,7 @@ where
         fixed_commitments,
         permutation_vk,
         cs,
+        selector_activations,
     ))
 }
 
@@ -328,7 +401,14 @@ where
     )?;
 
     let mut fixed = batch_invert_rational(assembly.fixed);
-    let (cs, selector_polys) = cs.directly_convert_selectors_to_fixed(assembly.selectors);
+    // Convert selectors the same way the verifying key did, so that both keys
+    // agree on fixed column assignments and rewritten gate expressions.
+    let (cs, selector_polys) = if vk.cs.selectors_compressed {
+        cs.compress_selectors(assembly.selectors)
+    } else {
+        cs.directly_convert_selectors_to_fixed(assembly.selectors)
+    };
+    debug_assert_eq!(cs.num_fixed_columns, vk.cs.num_fixed_columns);
     fixed.extend(selector_polys.into_iter().map(|poly| vk.domain.lagrange_from_vec(poly)));
 
     let fixed_polys: Vec<_> =
