@@ -220,7 +220,8 @@ where
 impl<F: WithSmallOrderMulGroup<3>, CS: PolynomialCommitmentScheme<F>> VerifyingKey<F, CS> {
     /// Return the bytes_length of a VerifyingKey
     pub fn bytes_length(&self, format: SerdeFormat) -> usize {
-        10 + (self.fixed_commitments.iter().map(|c| c.byte_length(format)).sum::<usize>())
+        // 6 bytes of headers: version (1), k (1) and fixed commitment count (4).
+        6 + (self.fixed_commitments.iter().map(|c| c.byte_length(format)).sum::<usize>())
             + self.permutation.bytes_length(format)
     }
 
